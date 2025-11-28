@@ -10,7 +10,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "rawpy"
 version = "0.25.1"
-author = "Maik Riechert"
+authors = [{name = "Maik Riechert"}]
 description = "RAW image processing for Python, a wrapper for libraw"
 readme = "README.md"
 requires-python = ">=3.9"
