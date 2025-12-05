@@ -9,6 +9,7 @@ from cpython.bytes cimport PyBytes_FromStringAndSize
 from cpython.mem cimport PyMem_Free
 from cython.operator cimport dereference as deref
 from libc.stddef cimport wchar_t
+from libc.time cimport time_t
 
 import numpy as np
 from collections import namedtuple
@@ -177,6 +178,20 @@ cdef extern from "libraw.h":
         unsigned    filters
         char        xtrans[6][6]
         char        cdesc[5]
+
+    ctypedef struct libraw_lensinfo_t:
+        char LensMake[128]
+        char Lens[128]
+
+    ctypedef struct libraw_imgother_t:
+        float iso_speed
+        float shutter
+        float aperture
+        float focal_len
+        time_t timestamp
+        unsigned shot_order
+        char desc[512]
+        char artist[64]
         
     ctypedef struct libraw_data_t:
 #         ushort                      (*image)[4]
@@ -186,10 +201,10 @@ cdef extern from "libraw.h":
 #         unsigned int                progress_flags
 #         unsigned int                process_warnings
         libraw_colordata_t          color
-#         libraw_imgother_t           other
+        libraw_imgother_t           other
 #         libraw_thumbnail_t          thumbnail
         libraw_rawdata_t            rawdata
-#         void                *parent_class
+        libraw_lensinfo_t           lens 
 
     ctypedef struct libraw_processed_image_t:
         LibRaw_image_formats type
@@ -285,6 +300,24 @@ class ThumbFormat(Enum):
     """ RGB image as ndarray object. """
 
 Thumbnail = namedtuple('Thumbnail', ['format', 'data'])
+
+class CameraParams(object):
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
+    def __repr__(self):
+        return "CameraParams(" + ", ".join("{}={!r}".format(k, v) for k, v in self.__dict__.items()) + ")"
+
+class LensParams(object):
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
+    def __repr__(self):
+        return "LensParams(" + ", ".join("{}={!r}".format(k, v) for k, v in self.__dict__.items()) + ")"
+
+class OtherParams(object):
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
+    def __repr__(self):
+        return "OtherParams(" + ", ".join("{}={!r}".format(k, v) for k, v in self.__dict__.items()) + ")"
 
 class LibRawError(Exception):
     pass
@@ -799,6 +832,48 @@ cdef class RawPy:
             return np.PyArray_SimpleNewFromData(1, shape, np.NPY_USHORT,
                                                 &self.p.imgdata.rawdata.color.curve)
 
+    property camera_params:
+        """
+        Camera identification parameters.
+
+        :rtype: :class:`rawpy.CameraParams`
+        """
+        def __get__(self):
+            self.ensure_unpack()
+            cdef libraw_iparams_t* p = &self.p.imgdata.idata
+            return CameraParams(make=p.make.decode('utf-8'),
+                                model=p.model.decode('utf-8'))
+
+    property lens_params:
+        """
+        Lens identification parameters.
+        
+        :rtype: :class:`rawpy.LensParams`
+        """
+        def __get__(self):
+            self.ensure_unpack()
+            cdef libraw_lensinfo_t* p = &self.p.imgdata.lens
+            return LensParams(make=p.LensMake.decode('utf-8'),
+                            model=p.Lens.decode('utf-8'))
+
+    property other_params:
+        """
+        Other image parameters.
+
+        :rtype: :class:`rawpy.OtherParams`
+        """
+        def __get__(self):
+            self.ensure_unpack()
+            cdef libraw_imgother_t* p = &self.p.imgdata.other
+            return OtherParams(iso_speed=p.iso_speed,
+                                shutter=p.shutter,
+                                aperture=p.aperture,
+                                focal_len=p.focal_len,
+                                timestamp=p.timestamp,
+                                shot_order=p.shot_order,
+                                description=p.desc.decode('utf-8'),
+                                artist=p.artist.decode('utf-8'))
+                             
     def dcraw_process(self, params=None, **kw):
         """
         Postprocess the currently loaded RAW image.
