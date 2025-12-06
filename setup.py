@@ -39,8 +39,9 @@ if isLinux:
     # rpath=$ORIGIN allows to bundle libraw with the wheel
     extra_link_args += ['-Wl,-rpath,$ORIGIN']
 elif isMac:
-    # rpath=@loader_path allows to bundle libraw with the wheel
-    extra_link_args += ['-Wl,-rpath,@loader_path']
+    # On macOS, rpath is not needed because we set install_name_dir to @loader_path
+    # in the cmake build, which makes the library reference @loader_path-relative.
+    pass
 
 def _ask_pkg_config(resultlist, option, result_prefix='', sysroot=False):
     pkg_config = os.environ.get('PKG_CONFIG','pkg-config')
@@ -226,6 +227,11 @@ def unix_libraw_compile():
                      if buildGPLCode else '') +\
                     '-DCMAKE_INSTALL_PREFIX=install'
     
+    if isMac:
+        # This sets the install_name of the dylib to @loader_path/...
+        # so that the extension module can find it even if it's bundled in a wheel.
+        cmake_cmd += ' -DCMAKE_INSTALL_NAME_DIR=@loader_path'
+    
     cmds = [cmake_cmd,
             'cmake --build . --target install',
             ]
@@ -265,7 +271,7 @@ class build_ext(_build_ext):
                 if not os.path.isdir(lib_dir):
                     raise Exception(f'lib directory not found in {install_dir}')
 
-                libs = glob.glob(os.path.join(lib_dir, 'libraw_r.dylib*'))
+                libs = glob.glob(os.path.join(lib_dir, 'libraw_r*.dylib'))
                 if not libs:
                     raise Exception(f'libraw_r.dylib* not found after compilation in {lib_dir}')
                 
