@@ -20,11 +20,10 @@ from Cython.Build import cythonize
 # Note: Building GPL demosaic packs only works with libraw <= 0.18.
 #       See https://github.com/letmaik/rawpy/issues/72.
 buildGPLCode = os.getenv('RAWPY_BUILD_GPL_CODE') == '1'
-useSystemLibraw = os.getenv('RAWPY_USE_SYSTEM_LIBRAW') == '1'
-
 # don't treat mingw as Windows (https://stackoverflow.com/a/51200002)
 isWindows = os.name == 'nt' and 'GCC' not in sys.version
 isMac = sys.platform == 'darwin'
+isLinux = sys.platform.startswith('linux')
 is64Bit = sys.maxsize > 2**32
 
 # adapted from cffi's setup.py
@@ -34,6 +33,10 @@ include_dirs = []
 library_dirs = []
 extra_compile_args = []
 extra_link_args = []
+
+if isLinux:
+    # rpath=$ORIGIN allows to bundle libraw with the wheel
+    extra_link_args += ['-Wl,-rpath,$ORIGIN']
 
 def _ask_pkg_config(resultlist, option, result_prefix='', sysroot=False):
     pkg_config = os.environ.get('PKG_CONFIG','pkg-config')
@@ -61,48 +64,30 @@ def _ask_pkg_config(resultlist, option, result_prefix='', sysroot=False):
                          for path in res]
             resultlist[:] = res
 
-def use_pkg_config():
-    _ask_pkg_config(include_dirs,       '--cflags-only-I', '-I', sysroot=True)
-    _ask_pkg_config(extra_compile_args, '--cflags-only-other')
-    _ask_pkg_config(library_dirs,       '--libs-only-L', '-L', sysroot=True)
-    _ask_pkg_config(extra_link_args,    '--libs-only-other')
-    _ask_pkg_config(libraries,          '--libs-only-l', '-l')
-
 # Some thoughts on bundling LibRaw in Linux installs:
 # Compiling and bundling libraw.so like in the Windows wheels is likely not
 # easily possible for Linux. This is due to the fact that the dynamic linker ld
 # doesn't search for libraw.so in the directory where the Python extension is in.
 # The -rpath with $ORIGIN method can not be used in this case as $ORIGIN is always
-# relative to the executable and not the shared library, 
+# relative to the executable and not the shared library,
 # see https://stackoverflow.com/q/6323603.
 # But note that this was never tested and may actually still work somehow.
 # matplotlib works around such problems by including external libraries as pure
 # Python extensions, partly rewriting their sources and removing any dependency
-# on a configure script, or cmake or other build infrastructure. 
+# on a configure script, or cmake or other build infrastructure.
 # A possible work-around could be to statically link against libraw.
 
-if (isWindows or isMac) and not useSystemLibraw:
-    external_dir = os.path.abspath('external')
-    libraw_dir = os.path.join(external_dir, 'LibRaw')
-    cmake_build = os.path.join(external_dir, 'LibRaw-cmake', 'build')
-    install_dir = os.path.join(cmake_build, 'install')
-    
-    include_dirs += [os.path.join(install_dir, 'include', 'libraw')]
-    library_dirs += [os.path.join(install_dir, 'lib')]
-    libraries = ['raw_r']
-    
-    # for Windows and Mac we use cmake, so libraw_config.h will always exist
-    libraw_config_found = True
-else:
-    use_pkg_config()
-    
-    # check if libraw_config.h exists
-    # this header is only installed when using cmake
-    libraw_config_found = False
-    for include_dir in include_dirs:
-        if 'libraw_config.h' in os.listdir(include_dir):
-            libraw_config_found = True
-            break
+external_dir = os.path.abspath('external')
+libraw_dir = os.path.join(external_dir, 'LibRaw')
+cmake_build = os.path.join(external_dir, 'LibRaw-cmake', 'build')
+install_dir = os.path.join(cmake_build, 'install')
+
+include_dirs += [os.path.join(install_dir, 'include', 'libraw')]
+library_dirs += [os.path.join(install_dir, 'lib')]
+libraries = ['raw_r']
+
+# we use cmake, so libraw_config.h will always exist
+libraw_config_found = True
 
 define_macros = [('_HAS_LIBRAW_CONFIG_H', '1' if libraw_config_found else '0')]
 
@@ -218,17 +203,16 @@ def windows_libraw_compile():
         print('copying', src, '->', dest)
         shutil.copyfile(src, dest)
  
-def mac_libraw_compile():
+def unix_libraw_compile():
     clone_submodules()
         
     # configure and compile libraw
     cwd = os.getcwd()
-    if not os.path.exists(cmake_build):
-        os.mkdir(cmake_build)
+    shutil.rmtree(cmake_build, ignore_errors=True)
+    os.makedirs(cmake_build, exist_ok=True)
     os.chdir(cmake_build)
         
-    install_name_dir = os.path.join(install_dir, 'lib')
-    cmds = ['cmake .. -DCMAKE_BUILD_TYPE=Release ' +\
+    cmake_cmd = 'cmake .. -DCMAKE_BUILD_TYPE=Release ' +\
                     '-DLIBRAW_PATH=' + libraw_dir + ' ' +\
                     '-DENABLE_X3FTOOLS=ON -DENABLE_6BY9RPI=ON ' +\
                     '-DENABLE_OPENMP=OFF ' +\
@@ -236,7 +220,13 @@ def mac_libraw_compile():
                     ('-DENABLE_DEMOSAIC_PACK_GPL2=ON -DDEMOSAIC_PACK_GPL2_RPATH=../../LibRaw-demosaic-pack-GPL2 ' +\
                      '-DENABLE_DEMOSAIC_PACK_GPL3=ON -DDEMOSAIC_PACK_GPL3_RPATH=../../LibRaw-demosaic-pack-GPL3 '
                      if buildGPLCode else '') +\
-                    '-DCMAKE_INSTALL_PREFIX=install -DCMAKE_INSTALL_NAME_DIR=' + install_name_dir,
+                    '-DCMAKE_INSTALL_PREFIX=install'
+
+    if isMac:
+        install_name_dir = os.path.join(install_dir, 'lib')
+        cmake_cmd += ' -DCMAKE_INSTALL_NAME_DIR=' + install_name_dir
+    
+    cmds = [cmake_cmd,
             'cmake --build . --target install',
             ]
     for cmd in cmds:
@@ -251,13 +241,31 @@ package_data = {}
 # evil hack, check cmd line for relevant commands
 # custom cmdclasses didn't work out in this case
 cmdline = ''.join(sys.argv[1:])
-needsCompile = any(s in cmdline for s in ['install', 'bdist', 'build_ext']) and not useSystemLibraw
-if isWindows and needsCompile:
-    windows_libraw_compile()        
-    package_data['rawpy'] = ['*.dll']
-
-elif isMac and needsCompile:
-    mac_libraw_compile()        
+needsCompile = any(s in cmdline for s in ['install', 'bdist', 'build_ext'])
+if needsCompile:
+    if isWindows:
+        windows_libraw_compile()
+        package_data['rawpy'] = ['*.dll']
+    elif isMac or isLinux:
+        unix_libraw_compile()
+        if isMac:
+            lib_files = glob.glob(os.path.join(install_dir, 'lib', 'libraw_r.dylib*'))
+            if not lib_files:
+                raise Exception('libraw_r.dylib not found after compilation!')
+            for src in lib_files:
+                dest = os.path.join('rawpy', os.path.basename(src))
+                print('copying', src, '->', dest)
+                shutil.copy(src, dest, follow_symlinks=False)
+            package_data['rawpy'] = ['*.dylib*']
+        elif isLinux:
+            lib_files = glob.glob(os.path.join(install_dir, 'lib', 'libraw_r.so*'))
+            if not lib_files:
+                raise Exception('libraw_r.so not found after compilation!')
+            for src in lib_files:
+                dest = os.path.join('rawpy', os.path.basename(src))
+                print('copying', src, '->', dest)
+                shutil.copy(src, dest, follow_symlinks=False)
+            package_data['rawpy'] = ['*.so*']
 
 if any(s in cmdline for s in ['clean', 'sdist']):
     # When running sdist after a previous run of bdist or build_ext
