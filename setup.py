@@ -263,18 +263,34 @@ class build_ext(_build_ext):
                 print('copying', lib_path, '->', dest_dir)
                 shutil.copy(lib_path, dest_dir)
         elif isMac or isLinux:
-            lib_name = 'libraw_r.dylib' if isMac else 'libraw_r.so'
-            lib_path = os.path.join(install_dir, 'lib', lib_name)
-            if not os.path.exists(lib_path):
-                # try lib64 as well
-                lib_path = os.path.join(install_dir, 'lib64', lib_name)
+            if isMac:
+                lib_dir = os.path.join(install_dir, 'lib')
+                if not os.path.isdir(lib_dir):
+                    raise Exception(f'lib directory not found in {install_dir}')
 
-            if not os.path.exists(lib_path):
-                raise Exception(f'{lib_name} not found after compilation in {os.path.join(install_dir, "lib")} or {os.path.join(install_dir, "lib64")}')
+                libs = glob.glob(os.path.join(lib_dir, 'libraw_r.dylib*'))
+                if not libs:
+                    raise Exception(f'libraw_r.dylib* not found after compilation in {lib_dir}')
+                
+                for lib_path in libs:
+                    dest_path = os.path.join(dest_dir, os.path.basename(lib_path))
+                    print(f'copying {lib_path} -> {dest_path}')
+                    shutil.copy(lib_path, dest_path, follow_symlinks=True)
+            elif isLinux:
+                lib_dir = os.path.join(install_dir, 'lib')
+                if not os.path.isdir(lib_dir):
+                    lib_dir = os.path.join(install_dir, 'lib64') # try lib64
+                if not os.path.isdir(lib_dir):
+                    raise Exception(f'lib directory not found in {install_dir}')
 
-            dest_path = os.path.join(dest_dir, lib_name)
-            print(f'copying {lib_path} -> {dest_path}')
-            shutil.copy(lib_path, dest_path, follow_symlinks=True)
+                libs = glob.glob(os.path.join(lib_dir, 'libraw_r.so*'))
+                if not libs:
+                    raise Exception(f'libraw_r.so* not found after compilation in {lib_dir}')
+                
+                for lib_path in libs:
+                    dest_path = os.path.join(dest_dir, os.path.basename(lib_path))
+                    print(f'copying {lib_path} -> {dest_path}')
+                    shutil.copy(lib_path, dest_path, follow_symlinks=True)
 
 if any(s in cmdline for s in ['clean', 'sdist']):
     # When running sdist after a previous run of bdist or build_ext
