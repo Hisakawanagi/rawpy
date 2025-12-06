@@ -1,5 +1,2 @@
 include README.rst
 include rawpy/def_helper.h
-include rawpy/*.dll
-include rawpy/*.dylib*
-include rawpy/*.so*

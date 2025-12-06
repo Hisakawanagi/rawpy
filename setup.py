@@ -1,4 +1,5 @@
 from setuptools import setup, Extension, find_packages
+from setuptools.command.build_ext import build_ext as _build_ext
 import subprocess
 import errno
 import os
@@ -243,31 +244,30 @@ package_data = {}
 # evil hack, check cmd line for relevant commands
 # custom cmdclasses didn't work out in this case
 cmdline = ''.join(sys.argv[1:])
-needsCompile = any(s in cmdline for s in ['install', 'bdist', 'build_ext'])
-if needsCompile:
-    if isWindows:
-        windows_libraw_compile()
-        package_data['rawpy'] = ['*.dll']
-    elif isMac or isLinux:
-        unix_libraw_compile()
-        if isMac:
-            lib_files = glob.glob(os.path.join(install_dir, 'lib', 'libraw_r.dylib*'))
-            if not lib_files:
-                raise Exception('libraw_r.dylib not found after compilation!')
-            for src in lib_files:
-                dest = os.path.join('rawpy', os.path.basename(src))
-                print('copying', src, '->', dest)
-                shutil.copy(src, dest, follow_symlinks=False)
-            package_data['rawpy'] = ['*.dylib*']
+class build_ext(_build_ext):
+    def run(self):
+        if isWindows:
+            windows_libraw_compile()
+        elif isMac or isLinux:
+            unix_libraw_compile()
+        
+        super().run()
+        
+        if isWindows:
+            libs = glob.glob(os.path.join(install_dir, 'bin', 'raw_r.dll'))
+            libs += glob.glob(os.path.join(install_dir, 'bin', 'vcomp*.dll'))
+        elif isMac:
+            libs = glob.glob(os.path.join(install_dir, 'lib', 'libraw_r.dylib*'))
         elif isLinux:
-            lib_files = glob.glob(os.path.join(install_dir, 'lib', 'libraw_r.so*'))
-            if not lib_files:
-                raise Exception('libraw_r.so not found after compilation!')
-            for src in lib_files:
-                dest = os.path.join('rawpy', os.path.basename(src))
-                print('copying', src, '->', dest)
-                shutil.copy(src, dest, follow_symlinks=False)
-            package_data['rawpy'] = ['*.so*']
+            libs = glob.glob(os.path.join(install_dir, 'lib', 'libraw_r.so*'))
+        
+        if not libs:
+            raise Exception('no libraw binaries found after compilation')
+            
+        for lib in libs:
+            dest = os.path.join(self.build_lib, 'rawpy', os.path.basename(lib))
+            print('copying', lib, '->', dest)
+            shutil.copy(lib, dest, follow_symlinks=False)
 
 if any(s in cmdline for s in ['clean', 'sdist']):
     # When running sdist after a previous run of bdist or build_ext
@@ -321,7 +321,6 @@ setup(
       ],
       packages = find_packages(),
       ext_modules = extensions,
-      package_data = package_data,
-      include_package_data = True,
+      cmdclass={'build_ext': build_ext},
       install_requires=['numpy >= 1.26.0']
 )
