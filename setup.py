@@ -225,9 +225,6 @@ def unix_libraw_compile():
                      '-DENABLE_DEMOSAIC_PACK_GPL3=ON -DDEMOSAIC_PACK_GPL3_RPATH=../../LibRaw-demosaic-pack-GPL3 '
                      if buildGPLCode else '') +\
                     '-DCMAKE_INSTALL_PREFIX=install'
-
-    if isMac:
-        cmake_cmd += ' -DCMAKE_INSTALL_NAME_DIR=@rpath'
     
     cmds = [cmake_cmd,
             'cmake --build . --target install',
