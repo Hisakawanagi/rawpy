@@ -253,21 +253,28 @@ class build_ext(_build_ext):
         
         super().run()
         
+        dest_dir = os.path.join(self.build_lib, 'rawpy')
         if isWindows:
             libs = glob.glob(os.path.join(install_dir, 'bin', 'raw_r.dll'))
             libs += glob.glob(os.path.join(install_dir, 'bin', 'vcomp*.dll'))
-        elif isMac:
-            libs = glob.glob(os.path.join(install_dir, 'lib', 'libraw_r.dylib*'))
-        elif isLinux:
-            libs = glob.glob(os.path.join(install_dir, 'lib', 'libraw_r.so*'))
-        
-        if not libs:
-            raise Exception('no libraw binaries found after compilation')
-            
-        for lib in libs:
-            dest = os.path.join(self.build_lib, 'rawpy', os.path.basename(lib))
-            print('copying', lib, '->', dest)
-            shutil.copy(lib, dest, follow_symlinks=False)
+            if not libs:
+                raise Exception('no libraw binaries found after compilation')
+            for lib_path in libs:
+                print('copying', lib_path, '->', dest_dir)
+                shutil.copy(lib_path, dest_dir)
+        elif isMac or isLinux:
+            lib_name = 'libraw_r.dylib' if isMac else 'libraw_r.so'
+            lib_path = os.path.join(install_dir, 'lib', lib_name)
+            if not os.path.exists(lib_path):
+                # try lib64 as well
+                lib_path = os.path.join(install_dir, 'lib64', lib_name)
+
+            if not os.path.exists(lib_path):
+                raise Exception(f'{lib_name} not found after compilation in {os.path.join(install_dir, "lib")} or {os.path.join(install_dir, "lib64")}')
+
+            dest_path = os.path.join(dest_dir, lib_name)
+            print(f'copying {lib_path} -> {dest_path}')
+            shutil.copy(lib_path, dest_path, follow_symlinks=True)
 
 if any(s in cmdline for s in ['clean', 'sdist']):
     # When running sdist after a previous run of bdist or build_ext
