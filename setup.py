@@ -37,6 +37,9 @@ extra_link_args = []
 if isLinux:
     # rpath=$ORIGIN allows to bundle libraw with the wheel
     extra_link_args += ['-Wl,-rpath,$ORIGIN']
+elif isMac:
+    # rpath=@loader_path allows to bundle libraw with the wheel
+    extra_link_args += ['-Wl,-rpath,@loader_path']
 
 def _ask_pkg_config(resultlist, option, result_prefix='', sysroot=False):
     pkg_config = os.environ.get('PKG_CONFIG','pkg-config')
@@ -223,8 +226,7 @@ def unix_libraw_compile():
                     '-DCMAKE_INSTALL_PREFIX=install'
 
     if isMac:
-        install_name_dir = os.path.join(install_dir, 'lib')
-        cmake_cmd += ' -DCMAKE_INSTALL_NAME_DIR=' + install_name_dir
+        cmake_cmd += ' -DCMAKE_INSTALL_NAME_DIR=@rpath'
     
     cmds = [cmake_cmd,
             'cmake --build . --target install',
