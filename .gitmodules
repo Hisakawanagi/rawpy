@@ -1,6 +1,6 @@
 [submodule "external/LibRaw"]
 	path = external/LibRaw
-	url = https://github.com/LibRaw/LibRaw.git
+	url = https://github.com/shenmintao/LibRaw.git
 	ignore = dirty
 	branch = master
 [submodule "external/LibRaw-demosaic-pack-GPL2"]
