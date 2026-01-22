@@ -19,6 +19,7 @@ np.import_array()
 import os
 import sys
 import warnings
+import struct
 from enum import Enum
 
 cdef extern from "limits.h":
@@ -53,6 +54,16 @@ cdef extern from "data_helper.h":
 
 cdef extern from "libraw.h":
     ctypedef unsigned short ushort
+    ctypedef long long INT64
+    
+    ctypedef void (*exif_parser_callback)(void *context, int tag, int type,
+                                       int len, unsigned int ord, void *ifp,
+                                       INT64 base)
+    
+    cdef cppclass LibRaw_abstract_datastream:
+        int read(void *buffer, size_t size, size_t count)
+        INT64 tell()
+        INT64 seek(INT64 offset, int whence)
     
     # some #define's
     cdef int LIBRAW_MAJOR_VERSION
@@ -88,6 +99,7 @@ cdef extern from "libraw.h":
         unsigned    linear_max[4]
         float       cmatrix[3][4]
         float       cam_xyz[4][3]
+        float       rgb_cam[3][4]
         void        *profile # a string?
         unsigned    profile_length
 
@@ -169,6 +181,7 @@ cdef extern from "libraw.h":
     ctypedef struct libraw_iparams_t:
         char        make[64]
         char        model[64]
+        char        software[64]
     
         unsigned    raw_count
         unsigned    dng_version
@@ -182,6 +195,9 @@ cdef extern from "libraw.h":
     ctypedef struct libraw_lensinfo_t:
         char LensMake[128]
         char Lens[128]
+        char makernotes[128]
+        float MinFocal, MaxFocal, MaxAp4MinFocal, MaxAp4MaxFocal
+        float EXIF_MaxAp
 
     ctypedef struct libraw_imgother_t:
         float iso_speed
@@ -232,6 +248,8 @@ IF UNAME_SYSNAME == "Windows":
             void free_image() nogil
             const char* strerror(int p) nogil
             void recycle() nogil
+            void set_exifparser_handler(exif_parser_callback cb, void *data) nogil
+            void set_makernotes_handler(exif_parser_callback cb, void *data) nogil
 ELSE:
     cdef extern from "libraw.h":
         cdef cppclass LibRaw:
@@ -250,6 +268,8 @@ ELSE:
             void free_image() nogil
             const char* strerror(int p) nogil
             void recycle() nogil
+            void set_exifparser_handler(exif_parser_callback cb, void *data) nogil
+            void set_makernotes_handler(exif_parser_callback cb, void *data) nogil
 
 libraw_version = (LIBRAW_MAJOR_VERSION, LIBRAW_MINOR_VERSION, LIBRAW_PATCH_VERSION)
 
@@ -300,6 +320,46 @@ class ThumbFormat(Enum):
     """ RGB image as ndarray object. """
 
 Thumbnail = namedtuple('Thumbnail', ['format', 'data'])
+ExifTag = namedtuple('ExifTag', ['tag', 'type', 'value', 'offset', 'length', 'order'])
+
+def _unpack_exif(bytes data, int type, int count, int order):
+    endian = '<' if order == 0x4949 else '>'
+    
+    if type == 2: # ASCII
+        return data.decode('utf-8', 'ignore').rstrip('\x00')
+    
+    fmt_map = {
+        1: 'B', # BYTE
+        3: 'H', # SHORT
+        4: 'I', # LONG
+        6: 'b', # SBYTE
+        8: 'h', # SSHORT
+        9: 'i', # SLONG
+        11: 'f', # FLOAT
+        12: 'd', # DOUBLE
+    }
+    
+    if type in fmt_map:
+        fmt = endian + str(count) + fmt_map[type]
+        try:
+            val = struct.unpack(fmt, data)
+            return val if count > 1 else val[0]
+        except:
+            return data
+            
+    if type == 5 or type == 10: # RATIONAL, SRATIONAL
+        comp_fmt = 'I' if type == 5 else 'i'
+        fmt = endian + str(count * 2) + comp_fmt
+        try:
+            vals = struct.unpack(fmt, data)
+            res = []
+            for i in range(0, len(vals), 2):
+                res.append((vals[i], vals[i+1]))
+            return res if count > 1 else res[0]
+        except:
+            return data
+            
+    return data
 
 class CameraParams(object):
     def __init__(self, **kwargs):
@@ -373,6 +433,54 @@ class LibRawTooBigError(LibRawFatalError):
 class LibRawMemPoolOverflowError(LibRawFatalError):
     pass
 
+cdef int get_element_size(int type) nogil:
+    if type == 1 or type == 2 or type == 6 or type == 7:
+        return 1
+    elif type == 3 or type == 8:
+        return 2
+    elif type == 4 or type == 9 or type == 11:
+        return 4
+    elif type == 5 or type == 10 or type == 12:
+        return 8
+    return 0
+
+cdef void parse_exif_callback(void *context, int tag, int type, int len, unsigned int ord, void *ifp, INT64 base) noexcept with gil:
+    if context == NULL:
+        return
+    cdef object exif_callback_obj = <object>context
+    cdef dict exif_dict = <dict>exif_callback_obj
+    
+    cdef LibRaw_abstract_datastream *stream = <LibRaw_abstract_datastream*>ifp
+    if stream == NULL:
+        return
+    
+    cdef int element_size = get_element_size(type)
+    if element_size == 0:
+        return
+        
+    cdef size_t total_size = <size_t>len * <size_t>element_size
+    # Safety check, similar to LibRaw limits
+    if total_size > 100 * 1024 * 1024:
+        return
+        
+    cdef bytearray data = bytearray(total_size)
+    cdef char* buf = data
+    
+    # LibRaw sets the stream position to the start of data before calling the callback.
+    # It also restores the position after the callback returns (in some places).
+    # To be safe, we can restore it ourselves, or rely on LibRaw.
+    # Looking at `exif_gps.cpp`, it does `fseek(ifp, savepos, SEEK_SET)` after callback.
+    # So we can read freely.
+    
+    cdef INT64 offset = stream.tell()
+    
+    if stream.read(buf, 1, total_size) != total_size:
+        # If read failed (EOF?), we might get partial data or nothing.
+        # We can still store what we got, or skip.
+        pass
+        
+    exif_dict[tag] = ExifTag(tag, type, bytes(data), offset, len, ord)
+
 # From LibRaw_errors in libraw_const.h
 _LIBRAW_ERROR_MAP = {
     -1: LibRawUnspecifiedError,
@@ -392,6 +500,104 @@ _LIBRAW_ERROR_MAP = {
     -100013: LibRawMemPoolOverflowError
 }
 
+cdef class RawMetadata:
+    """
+    Structured access to LibRaw-parsed metadata.
+    This exposes LibRaw's normalized metadata only.
+    """
+    cdef LibRaw* p
+
+    cdef void set_ptr(self, LibRaw* ptr):
+        self.p = ptr
+
+    property camera:
+        def __get__(self):
+            cdef dict d = {}
+            d["make"] = self.p.imgdata.idata.make.decode("utf-8", "ignore")
+            d["model"] = self.p.imgdata.idata.model.decode("utf-8", "ignore")
+            d["software"] = self.p.imgdata.idata.software.decode("utf-8", "ignore")
+            d["raw_count"] = self.p.imgdata.idata.raw_count
+            return d
+
+    property exposure:
+        def __get__(self):
+            cdef dict d = {}
+            cdef libraw_imgother_t *o = &self.p.imgdata.other
+
+            if o.iso_speed > 0:
+                d["iso"] = o.iso_speed
+            if o.aperture > 0:
+                d["aperture"] = o.aperture
+            if o.shutter > 0:
+                d["shutter"] = o.shutter
+            if o.focal_len > 0:
+                d["focal_length"] = o.focal_len
+
+            return d
+
+    property lens:
+        def __get__(self):
+            cdef dict d = {}
+            cdef libraw_lensinfo_t *l = &self.p.imgdata.lens
+
+            if l.LensMake[0] != 0:
+                d["make"] = l.LensMake.decode("utf-8", "ignore")
+            if l.Lens[0] != 0:
+                d["model"] = l.Lens.decode("utf-8", "ignore")
+
+            if l.makernotes[0] != 0:
+                d["maker_notes"] = l.makernotes.decode("utf-8", "ignore")
+
+            if l.MinFocal > 0:
+                d["min_focal"] = l.MinFocal
+            if l.MaxFocal > 0:
+                d["max_focal"] = l.MaxFocal
+            if l.MaxAp4MinFocal > 0:
+                d["max_aperture_at_min_focal"] = l.MaxAp4MinFocal
+            if l.MaxAp4MaxFocal > 0:
+                d["max_aperture_at_max_focal"] = l.MaxAp4MaxFocal
+            if l.EXIF_MaxAp > 0:
+                d["max_aperture_at_current_focal"] = l.EXIF_MaxAp
+
+            return d
+
+    property sizes:
+        def __get__(self):
+            cdef libraw_image_sizes_t *s = &self.p.imgdata.sizes
+            return {
+                "raw_width": s.raw_width,
+                "raw_height": s.raw_height,
+                "width": s.width,
+                "height": s.height,
+                "top_margin": s.top_margin,
+                "left_margin": s.left_margin,
+                "iwidth": s.iwidth,
+                "iheight": s.iheight,
+            }
+
+    property color:
+        def __get__(self):
+            cdef dict d = {}
+            d["black"] = self.p.imgdata.color.black
+            d["white"] = self.p.imgdata.color.maximum
+            d["cam_mul"] = [self.p.imgdata.color.cam_mul[i] for i in range(4)]
+            d["pre_mul"] = [self.p.imgdata.color.pre_mul[i] for i in range(4)]
+            d["rgb_cam"] = [
+                [self.p.imgdata.color.rgb_cam[i][j] for j in range(3)]
+                for i in range(3)
+            ]
+            return d
+
+    property raw:
+        def __get__(self):
+            return {
+                "sizes": self.sizes,
+                "camera": self.camera,
+                "lens": self.lens,
+                "exposure": self.exposure,
+                "color": self.color,
+            }
+
 cdef class RawPy:
     """
     Load RAW images, work on their data, and create a postprocessed (demosaiced) image.
@@ -402,11 +608,13 @@ cdef class RawPy:
     cdef bint unpack_called
     cdef bint unpack_thumb_called
     cdef object bytes
+    cdef public dict exif_tags
         
     def __cinit__(self):
         self.unpack_called = False
         self.unpack_thumb_called = False
         self.p = new LibRaw()
+        self.exif_tags = None
         
     def __dealloc__(self):
         del self.p
@@ -444,6 +652,10 @@ cdef class RawPy:
         cdef Py_ssize_t wchars_len
         self.unpack_called = False
         self.unpack_thumb_called = False
+        self.exif_tags = {}
+        self.p.set_exifparser_handler(parse_exif_callback, <void*>self.exif_tags)
+        self.p.set_makernotes_handler(parse_exif_callback, <void*>self.exif_tags)
+
         IF UNAME_SYSNAME == "Windows":
             wchars = PyUnicode_AsWideCharString(path, &wchars_len)
             if wchars == NULL:
@@ -465,6 +677,10 @@ cdef class RawPy:
         """
         self.unpack_called = False
         self.unpack_thumb_called = False
+        self.exif_tags = {}
+        self.p.set_exifparser_handler(parse_exif_callback, <void*>self.exif_tags)
+        self.p.set_makernotes_handler(parse_exif_callback, <void*>self.exif_tags)
+
         # we keep a reference to the byte buffer to avoid garbage collection
         self.bytes = fileobj.read()
         cdef char *buf = self.bytes
@@ -602,7 +818,25 @@ cdef class RawPy:
         cdef ushort left_margin = self.p.imgdata.sizes.left_margin
         cdef ushort raw_width = self.p.imgdata.sizes.raw_width
         return raw[(row+top_margin)*raw_width + column + left_margin]
-        
+
+    property lens:
+        def __get__(self):
+            cdef RawMetadata meta = RawMetadata()
+            meta.set_ptr(self.p)
+            return meta.lens
+
+    property camera:
+        def __get__(self):
+            cdef RawMetadata meta = RawMetadata()
+            meta.set_ptr(self.p)
+            return meta.camera
+            
+    property exposure:
+        def __get__(self):
+            cdef RawMetadata meta = RawMetadata()
+            meta.set_ptr(self.p)
+            return meta.exposure
+
     property sizes:
         """
         Return a :class:`rawpy.ImageSizes` instance with size information of
@@ -873,6 +1107,24 @@ cdef class RawPy:
                                 shot_order=p.shot_order,
                                 description=p.desc.decode('utf-8'),
                                 artist=p.artist.decode('utf-8'))
+
+    property exif:
+        """
+        All EXIF tags extracted from the image.
+        
+        :rtype: dict mapping tag id to value
+        """
+        def __get__(self):
+            if self.exif_tags is None:
+                return {}
+            return {tag: _unpack_exif(info.value, info.type, info.length, info.order) 
+                    for tag, info in self.exif_tags.items()}
+
+    property metadata:
+        def __get__(self):
+            cdef RawMetadata meta = RawMetadata()
+            meta.set_ptr(self.p)
+            return meta
                              
     def dcraw_process(self, params=None, **kw):
         """
